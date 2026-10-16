@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `Bundle::files` lists every file in a bundle, including those outside sled
+  directories.
+
 ### Fixed
 
 - `ereports list` and `ereports show` find ereports in real bundles, whose

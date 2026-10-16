@@ -118,6 +118,20 @@ pub struct LogOutput<'a> {
     pub exec: Option<&'a str>,
 }
 
+/// A file in a support bundle, as listed by [`Bundle::files`].
+#[derive(Clone, Debug)]
+pub struct BundleFile {
+    path: String,
+    loc: EntryLoc,
+}
+
+impl BundleFile {
+    /// The file's path within the bundle.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
 #[derive(Debug)]
 struct LogFile<'a> {
     path: &'a str,
@@ -457,6 +471,35 @@ impl<R: ReaderAt + Sync> Bundle<R> {
     pub fn with_exec_jobs(mut self, jobs: NonZeroUsize) -> Self {
         self.exec_jobs = jobs;
         self
+    }
+
+    /// List every file in the bundle, wherever it is, in archive order. Directories are left out.
+    pub fn files(&self) -> Result<Vec<BundleFile>> {
+        let mut files = Vec::new();
+        for_each_entry(&self.archive, |path, record| {
+            if !path.ends_with('/') {
+                files.push(BundleFile {
+                    path: path.to_string(),
+                    loc: EntryLoc::new(record),
+                });
+            }
+            Ok(())
+        })?;
+        Ok(files)
+    }
+
+    /// Open a given file listed by [`Bundle::files`].
+    pub fn open(&self, file: &BundleFile) -> Result<Box<dyn Read + '_>> {
+        let open = || -> Result<Box<dyn Read + '_>> {
+            let entry = self.archive.get_entry(file.loc.wayfinder)?;
+            let reader = Verifier::new(decompress(entry.reader(), file.loc.method)?, file.loc);
+            if !file.loc.zstd {
+                return Ok(Box::new(reader));
+            }
+            // Decode files compressed with zstd, as `logs` prints them.
+            Ok(Box::new(zstd::Decoder::new(reader)?))
+        };
+        open().with_context(|| format!("failed to open file {}", file.path))
     }
 
     /// List all ereports in the archive.
@@ -1602,6 +1645,17 @@ mod tests {
         ]
     }
 
+    /// Read a file listed by [`Bundle::files`] or [`Bundle::ereports`] to the end.
+    fn read_file<R: ReaderAt + Sync>(bundle: &Bundle<R>, file: &BundleFile) -> String {
+        let mut contents = String::new();
+        bundle
+            .open(file)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        contents
+    }
+
     fn build_zip(buf: &mut Vec<u8>) -> ZipArchive<Cursor<&[u8]>> {
         build_zip_from(buf, zip_files(), false)
     }
@@ -2325,8 +2379,18 @@ mod tests {
         let archive = ZipArchive::from_slice(&buf[..])
             .unwrap()
             .into_cursor_archive();
-        let err = Bundle::from_archive(archive)
+        let bundle = Bundle::from_archive(archive).unwrap();
+
+        let nexus_log = bundle
+            .files()
             .unwrap()
+            .into_iter()
+            .find(|file| file.path().contains("oxide-nexus"))
+            .unwrap();
+        let err = io::copy(&mut bundle.open(&nexus_log).unwrap(), &mut io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err:#}");
+
+        let err = bundle
             .logs(
                 LogFilter {
                     path: &[Pattern::new("*oxide-nexus*").unwrap()],
@@ -2342,6 +2406,36 @@ mod tests {
             Some(io::ErrorKind::InvalidData),
             "{err:#}"
         );
+    }
+
+    /// Every file is listed and read, including those outside sled directories, and files
+    /// compressed with zstd are decoded.
+    #[test]
+    fn test_files() {
+        let mut buf = Vec::new();
+        let bundle = Bundle::from_archive(build_zip_from(&mut buf, zip_files(), true)).unwrap();
+
+        let expected: Vec<_> = zip_files()
+            .into_iter()
+            .filter_map(|file| {
+                let suffix = if file.name.contains("/logs/") {
+                    ZSTD_SUFFIX
+                } else {
+                    ""
+                };
+                Some((format!("{}{suffix}", file.name), file.contents? + "\n"))
+            })
+            .collect();
+        assert!(expected.iter().any(|(path, _)| path == "sled_info.json"));
+        assert!(expected.iter().any(|(path, _)| path.ends_with(ZSTD_SUFFIX)));
+
+        let files: Vec<_> = bundle
+            .files()
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.path().to_string(), read_file(&bundle, &file)))
+            .collect();
+        assert_eq!(files, expected);
     }
 
     #[test]
