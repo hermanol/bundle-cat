@@ -8,6 +8,8 @@
   zones and services.
 - `Bundle::unhealthy_sleds` gives the serial and cubby of
   each sled that `sled_info.json` lists but Nexus does not know.
+- `Bundle::uncollected_sleds` gives the serial and cubby of each sled known to
+  Nexus that a bundle was not collected from.
 
 ### Fixed
 

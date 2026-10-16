@@ -807,6 +807,14 @@ impl<R: ReaderAt + Sync> Bundle<R> {
         self.info.sleds.values()
     }
 
+    /// The serial and cubby of each sled known to Nexus, but not present in the bundle.
+    pub fn uncollected_sleds(&self) -> impl Iterator<Item = (&str, Option<u16>)> {
+        self.info
+            .uncollected_sleds
+            .iter()
+            .map(|(serial, cubby)| (serial.as_str(), *cubby))
+    }
+
     /// The serial and cubby of each sled that `sled_info.json` lists but Nexus does not know.
     pub fn unhealthy_sleds(&self) -> impl Iterator<Item = (&str, Option<u16>)> {
         self.info
@@ -901,6 +909,7 @@ impl<R: ReaderAt + Sync> Bundle<R> {
 struct BundleInfo {
     sleds: BTreeMap<String, SledInfo>,
     unhealthy_sleds: BTreeMap<String, Option<u16>>,
+    uncollected_sleds: BTreeMap<String, Option<u16>>,
 }
 
 impl BundleInfo {
@@ -982,6 +991,7 @@ impl BundleInfo {
         }
 
         let mut unhealthy_sleds = BTreeMap::new();
+        let mut uncollected_sleds = BTreeMap::new();
         if let Some(loc) = sled_info_json
             && let Ok(mut sled_info) = open_entry(archive, loc, &mut dctx)
         {
@@ -995,9 +1005,12 @@ impl BundleInfo {
                 Ok(cubby_info) => {
                     for (serial, id) in cubby_info.into_iter() {
                         if let Some(uuid) = id.uuid {
-                            // UUIDs are from Nexus, we will always have an existing entry.
+                            // UUIDs are from Nexus, so the sled has an entry unless it was not
+                            // collected.
                             if let Some(sled) = sleds.get_mut(&uuid) {
                                 sled.cubby = id.cubby;
+                            } else {
+                                uncollected_sleds.insert(serial, id.cubby);
                             }
                         } else {
                             // Sleds unknown to Nexus will have their serial and cubby from MGS.
@@ -1012,6 +1025,7 @@ impl BundleInfo {
         Ok(BundleInfo {
             sleds,
             unhealthy_sleds,
+            uncollected_sleds,
         })
     }
 }
@@ -1638,6 +1652,10 @@ mod tests {
   "BRM03250666": {
     "cubby": 13,
     "uuid": null
+  },
+  "BRM03250099": {
+    "cubby": 20,
+    "uuid": "0d3e6c65-58c1-4f2e-9b0a-5e1c0b2a7c11"
   }
 }"##.to_string()),
   ..Default::default()
@@ -2559,6 +2577,10 @@ mod tests {
         assert_eq!(
             bundle.unhealthy_sleds().collect::<Vec<_>>(),
             [("BRM03250666", Some(13))]
+        );
+        assert_eq!(
+            bundle.uncollected_sleds().collect::<Vec<_>>(),
+            [("BRM03250099", Some(20))]
         );
     }
 
