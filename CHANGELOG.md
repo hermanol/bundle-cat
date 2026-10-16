@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- `Bundle::known_sleds` gives each sled's UUID, cubby, serial, scrimlet role,
+  zones and services.
+- `Bundle::unhealthy_sleds` gives the serial and cubby of
+  each sled that `sled_info.json` lists but Nexus does not know.
+
 ### Fixed
 
 - `ereports list` and `ereports show` find ereports in real bundles, whose
