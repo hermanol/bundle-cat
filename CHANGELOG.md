@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `LogFile::from_path` classifies a sled file's path by zone, service, kind of
+  log and an archived log's timestamp.
+
 ### Fixed
 
 - `logs` returns an error rather than panicking on a sled directory without a

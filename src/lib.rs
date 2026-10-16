@@ -118,17 +118,29 @@ pub struct LogOutput<'a> {
     pub exec: Option<&'a str>,
 }
 
+/// Where a log sits within its service's directory. sled-diagnostics chooses
+/// the directory from oxlog's classification of the log, except that rotated
+/// logs still in the zone count as current.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogKind {
+    Current,
+    Archive,
+    Extra,
+}
+
+/// A file in a sled's directory, classified by its path.
 #[derive(Debug)]
-struct LogFile<'a> {
+pub struct LogFile<'a> {
     path: &'a str,
     sled_uuid: &'a str,
     service: Option<&'a str>,
     zone: Option<&'a str>,
+    kind: Option<LogKind>,
     timestamp: Option<i64>,
 }
 
 impl<'a> LogFile<'a> {
-    fn from_path(path: &'a str) -> Option<Self> {
+    pub fn from_path(path: &'a str) -> Option<Self> {
         // Ignore directories.
         if path.ends_with('/') {
             return None;
@@ -142,6 +154,12 @@ impl<'a> LogFile<'a> {
         parts.next()?;
         let zone = parts.next();
         let service = parts.next();
+        let kind = match parts.next() {
+            Some("current") => Some(LogKind::Current),
+            Some("archive") => Some(LogKind::Archive),
+            Some("extra") => Some(LogKind::Extra),
+            _ => None,
+        };
 
         // Only archived logs have a trailing timestamp.
         let timestamp = Self::extract_timestamp(strip_zstd_suffix(path));
@@ -151,8 +169,27 @@ impl<'a> LogFile<'a> {
             sled_uuid,
             service,
             zone,
+            kind,
             timestamp,
         })
+    }
+
+    pub fn zone(&self) -> Option<&'a str> {
+        self.zone
+    }
+
+    pub fn service(&self) -> Option<&'a str> {
+        self.service
+    }
+
+    /// Whether the file is a current, archived or extra log, if it is one.
+    pub fn kind(&self) -> Option<LogKind> {
+        self.kind
+    }
+
+    /// The timestamp appended to an archived log's name, before any zstd suffix.
+    pub fn timestamp(&self) -> Option<i64> {
+        self.timestamp
     }
 
     /// Extract trailing timestamp from paths with a file name like: "oxide-mg-ddm:default.log.1758510604".
@@ -1735,6 +1772,53 @@ mod tests {
             )
             .unwrap();
         assert_snapshot!("ereport_list_by_class", String::from_utf8_lossy(&class_out));
+    }
+
+    #[test]
+    fn test_log_file_from_path() {
+        type Class<'a> = (
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<LogKind>,
+            Option<i64>,
+        );
+        fn classify(path: &str) -> Option<Class<'_>> {
+            LogFile::from_path(path)
+                .map(|log| (log.zone(), log.service(), log.kind(), log.timestamp()))
+        }
+        let sled = "rack/r/sled/s";
+        let nexus = "oxz_nexus_n";
+        let cases = [
+            (
+                format!("{sled}/logs/{nexus}/nexus/current/oxide-nexus:default.log"),
+                Some((Some(nexus), Some("nexus"), Some(LogKind::Current), None)),
+            ),
+            // The timestamp of an archived log compressed with zstd is read from its original name.
+            (
+                format!("{sled}/logs/{nexus}/nexus/archive/oxide-nexus:default.log.1758510604.zst"),
+                Some((
+                    Some(nexus),
+                    Some("nexus"),
+                    Some(LogKind::Archive),
+                    Some(1758510604),
+                )),
+            ),
+            (
+                format!("{sled}/logs/global/sled-agent/extra/notes.log"),
+                Some((
+                    Some("global"),
+                    Some("sled-agent"),
+                    Some(LogKind::Extra),
+                    None,
+                )),
+            ),
+            (format!("{sled}/ipadm.json"), Some((None, None, None, None))),
+            (format!("{sled}/"), None),
+            ("sled_info.json".to_string(), None),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(classify(&path), expected, "{path}");
+        }
     }
 
     #[test]
