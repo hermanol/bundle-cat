@@ -6,6 +6,8 @@
 
 - `Bundle::files` lists every file in a bundle, including those outside sled
   directories.
+- `BundleFile::size` and `BundleFile::modified` give each file's size and
+  modification time.
 
 ### Fixed
 

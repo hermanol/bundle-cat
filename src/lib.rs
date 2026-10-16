@@ -123,12 +123,23 @@ pub struct LogOutput<'a> {
 pub struct BundleFile {
     path: String,
     loc: EntryLoc,
+    modified: Option<Timestamp>,
 }
 
 impl BundleFile {
     /// The file's path within the bundle.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// The file's size as stored in the bundle.
+    pub fn size(&self) -> u64 {
+        self.loc.size
+    }
+
+    /// The file's recorded modification time, if present, taken as UTC.
+    pub fn modified(&self) -> Option<Timestamp> {
+        self.modified
     }
 }
 
@@ -481,6 +492,7 @@ impl<R: ReaderAt + Sync> Bundle<R> {
                 files.push(BundleFile {
                     path: path.to_string(),
                     loc: EntryLoc::new(record),
+                    modified: entry_mtime(record),
                 });
             }
             Ok(())
@@ -2435,6 +2447,49 @@ mod tests {
             .into_iter()
             .map(|file| (file.path().to_string(), read_file(&bundle, &file)))
             .collect();
+        assert_eq!(files, expected);
+    }
+
+    #[test]
+    fn test_file_metadata() {
+        let mut buf = Vec::new();
+        let bundle = Bundle::from_archive(build_zip(&mut buf)).unwrap();
+
+        let expected: Vec<_> = zip_files()
+            .into_iter()
+            .filter_map(|file| {
+                let t = file.mtime.unwrap_or_default();
+                let modified = jiff::civil::date(t.year() as i16, t.month() as i8, t.day() as i8)
+                    .at(t.hour() as i8, t.minute() as i8, t.second() as i8, 0)
+                    .to_zoned(TimeZone::UTC)
+                    .unwrap()
+                    .timestamp();
+                Some((
+                    file.name.to_string(),
+                    file.contents?.len() as u64 + 1,
+                    modified,
+                ))
+            })
+            .collect();
+        assert!(
+            expected
+                .iter()
+                .any(|(_, _, modified)| modified.to_string() == "2025-09-24T06:30:00Z")
+        );
+
+        let files: Vec<_> = bundle
+            .files()
+            .unwrap()
+            .into_iter()
+            .map(|file| {
+                (
+                    file.path().to_string(),
+                    file.size(),
+                    file.modified().unwrap(),
+                )
+            })
+            .collect();
+
         assert_eq!(files, expected);
     }
 
