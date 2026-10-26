@@ -556,7 +556,7 @@ impl<R: ReaderAt + Sync> Bundle<R> {
                 .info
                 .sleds
                 .get(log_file.sled_uuid)
-                .expect("BUG: UUID was not found in collected sled info");
+                .with_context(|| format!("{name} is in a sled directory without a sled.txt"))?;
 
             if sled_info.matches_patterns(filter.sled)
                 && log_file.matches_services(filter.service)
