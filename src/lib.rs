@@ -802,6 +802,27 @@ impl<R: ReaderAt + Sync> Bundle<R> {
         Ok(())
     }
 
+    /// The sleds known to Nexus, which each have a `sled.txt` in the bundle, ordered by UUID.
+    pub fn known_sleds(&self) -> impl Iterator<Item = &SledInfo> {
+        self.info.sleds.values()
+    }
+
+    /// The serial and cubby of each sled known to Nexus, but not present in the bundle.
+    pub fn uncollected_sleds(&self) -> impl Iterator<Item = (&str, Option<u16>)> {
+        self.info
+            .uncollected_sleds
+            .iter()
+            .map(|(serial, cubby)| (serial.as_str(), *cubby))
+    }
+
+    /// The serial and cubby of each sled that `sled_info.json` lists but Nexus does not know.
+    pub fn unhealthy_sleds(&self) -> impl Iterator<Item = (&str, Option<u16>)> {
+        self.info
+            .unhealthy_sleds
+            .iter()
+            .map(|(serial, cubby)| (serial.as_str(), *cubby))
+    }
+
     /// List all sleds shown in the bundle's inventory.
     pub fn sleds<W: Write>(&self, mut out: W) -> Result<()> {
         let mut by_cubby: Vec<_> = self.info.sleds.values().collect();
@@ -888,6 +909,7 @@ impl<R: ReaderAt + Sync> Bundle<R> {
 struct BundleInfo {
     sleds: BTreeMap<String, SledInfo>,
     unhealthy_sleds: BTreeMap<String, Option<u16>>,
+    uncollected_sleds: BTreeMap<String, Option<u16>>,
 }
 
 impl BundleInfo {
@@ -969,6 +991,7 @@ impl BundleInfo {
         }
 
         let mut unhealthy_sleds = BTreeMap::new();
+        let mut uncollected_sleds = BTreeMap::new();
         if let Some(loc) = sled_info_json
             && let Ok(mut sled_info) = open_entry(archive, loc, &mut dctx)
         {
@@ -982,9 +1005,12 @@ impl BundleInfo {
                 Ok(cubby_info) => {
                     for (serial, id) in cubby_info.into_iter() {
                         if let Some(uuid) = id.uuid {
-                            // UUIDs are from Nexus, we will always have an existing entry.
+                            // UUIDs are from Nexus, so the sled has an entry unless it was not
+                            // collected.
                             if let Some(sled) = sleds.get_mut(&uuid) {
                                 sled.cubby = id.cubby;
+                            } else {
+                                uncollected_sleds.insert(serial, id.cubby);
                             }
                         } else {
                             // Sleds unknown to Nexus will have their serial and cubby from MGS.
@@ -999,6 +1025,7 @@ impl BundleInfo {
         Ok(BundleInfo {
             sleds,
             unhealthy_sleds,
+            uncollected_sleds,
         })
     }
 }
@@ -1142,8 +1169,9 @@ fn read_sled_serial(sled_info: &str) -> Option<(String, bool)> {
     Some((sled_info[serial_start..serial_end].to_string(), is_scrimlet))
 }
 
+/// A sled known to Nexus, as listed by [`Bundle::known_sleds`].
 #[derive(PartialEq, Debug)]
-struct SledInfo {
+pub struct SledInfo {
     uuid: String,
     cubby: Option<u16>,
     serial: String,
@@ -1159,7 +1187,36 @@ impl PartialOrd for SledInfo {
 }
 
 impl SledInfo {
-    pub fn matches_patterns(&self, patterns: &[Pattern]) -> bool {
+    pub fn uuid(&self) -> &str {
+        &self.uuid
+    }
+
+    /// The sled's cubby, from `sled_info.json`.
+    pub fn cubby(&self) -> Option<u16> {
+        self.cubby
+    }
+
+    /// The sled's serial, from `sled.txt`.
+    pub fn serial(&self) -> &str {
+        &self.serial
+    }
+
+    /// Whether the sled is a scrimlet, from `sled.txt`.
+    pub fn is_scrimlet(&self) -> bool {
+        self.is_scrimlet
+    }
+
+    /// The zones with logs in the bundle, ordered by name.
+    pub fn zones(&self) -> &[String] {
+        &self.zones
+    }
+
+    /// The services with logs in the bundle, ordered by name.
+    pub fn services(&self) -> &[String] {
+        &self.services
+    }
+
+    fn matches_patterns(&self, patterns: &[Pattern]) -> bool {
         // Match all sleds if unspecified.
         if patterns.is_empty() {
             return true;
@@ -1595,6 +1652,10 @@ mod tests {
   "BRM03250666": {
     "cubby": 13,
     "uuid": null
+  },
+  "BRM03250099": {
+    "cubby": 20,
+    "uuid": "0d3e6c65-58c1-4f2e-9b0a-5e1c0b2a7c11"
   }
 }"##.to_string()),
   ..Default::default()
@@ -2464,6 +2525,63 @@ mod tests {
         let mut out = Vec::new();
         bundle.sleds(&mut out).unwrap();
         assert_snapshot!("sleds", String::from_utf8_lossy(&out));
+    }
+
+    #[test]
+    fn test_sled_inventory() {
+        let mut buf = Vec::new();
+        let bundle = Bundle::from_archive(build_zip(&mut buf)).unwrap();
+
+        let sleds: Vec<_> = bundle
+            .known_sleds()
+            .map(|sled| {
+                (
+                    sled.uuid(),
+                    sled.cubby(),
+                    sled.serial(),
+                    sled.is_scrimlet(),
+                    sled.zones(),
+                    sled.services(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sleds,
+            [
+                (
+                    "690650fd-4f95-4b3a-b2ec-977d47154383",
+                    Some(14),
+                    "BRM03250013",
+                    true,
+                    &["oxz_switch".to_string()][..],
+                    &["dendrite".to_string()][..],
+                ),
+                (
+                    "f589c739-3c4c-4731-8f6f-41c8b2e72f89",
+                    Some(8),
+                    "BRM03250017",
+                    false,
+                    &[
+                        "global".to_string(),
+                        "oxz_nexus_b48c76b6-656f-4258-862a-4d2a2b9abfc0".to_string(),
+                        "oxz_ntp_b4c60b54-c6e8-40e8-90f6-57a7ee2ce107".to_string(),
+                    ][..],
+                    &[
+                        "nexus".to_string(),
+                        "ntp".to_string(),
+                        "sled-agent".to_string(),
+                    ][..],
+                ),
+            ]
+        );
+        assert_eq!(
+            bundle.unhealthy_sleds().collect::<Vec<_>>(),
+            [("BRM03250666", Some(13))]
+        );
+        assert_eq!(
+            bundle.uncollected_sleds().collect::<Vec<_>>(),
+            [("BRM03250099", Some(20))]
+        );
     }
 
     #[test]
