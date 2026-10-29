@@ -8,6 +8,8 @@
   directories.
 - `BundleFile::size` and `BundleFile::modified` give each file's size and
   modification time.
+- `Bundle::ereports` includes part, serial, restart ID and ENA, and
+  `read_ereport_class` reads an ereport's class from its contents.
 
 ### Fixed
 

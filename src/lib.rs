@@ -514,13 +514,19 @@ impl<R: ReaderAt + Sync> Bundle<R> {
         open().with_context(|| format!("failed to open file {}", file.path))
     }
 
+    /// Every ereport in the bundle with its file, in archive order. Files under `ereports/` whose
+    /// names cannot be parsed are reported on stderr and skipped.
+    pub fn ereports(&self) -> Result<Vec<(BundleFile, Ereport)>> {
+        self.matching_ereports(ComponentInfo::default())
+    }
+
     /// List all ereports in the archive.
     pub fn ereports_list<W: Write>(&self, components: ComponentInfo<'_>, mut out: W) -> Result<()> {
         let ereports = self.matching_ereports(components)?;
 
         let max_ena_len = ereports
             .iter()
-            .map(|(_, _, ereport)| ereport.ena)
+            .map(|(_, ereport)| ereport.ena)
             .max()
             .map(|max| format!("{max:#x}").len())
             .unwrap_or(3);
@@ -531,8 +537,8 @@ impl<R: ReaderAt + Sync> Bundle<R> {
             "PART", "SERIAL", "RESTART_ID", "ENA",
         )?;
         let mut dctx = DCtx::create();
-        for (loc, path, ereport) in ereports {
-            let contents = read_to_string(&self.archive, loc, &path, &mut dctx)?;
+        for (file, ereport) in ereports {
+            let contents = read_to_string(&self.archive, file.loc, &file.path, &mut dctx)?;
             let ereport_class = read_ereport_class(&contents);
 
             if let Some(ereport_class) = ereport_class
@@ -563,8 +569,8 @@ impl<R: ReaderAt + Sync> Bundle<R> {
         mut out: W,
     ) -> Result<()> {
         let mut dctx = DCtx::create();
-        for (loc, path, _) in self.matching_ereports(components)? {
-            let contents = read_to_string(&self.archive, loc, &path, &mut dctx)?;
+        for (file, _) in self.matching_ereports(components)? {
+            let contents = read_to_string(&self.archive, file.loc, &file.path, &mut dctx)?;
 
             if let Some(ereport_class) = read_ereport_class(&contents)
                 && !matches_patterns(components.class, ereport_class)
@@ -573,7 +579,7 @@ impl<R: ReaderAt + Sync> Bundle<R> {
             }
 
             if !no_header {
-                writeln!(out, "==> {path} <==")?;
+                writeln!(out, "==> {} <==", file.path)?;
             }
 
             if let Ok(json) = serde_json::from_str::<Value>(&contents)
@@ -819,7 +825,7 @@ impl<R: ReaderAt + Sync> Bundle<R> {
     fn matching_ereports(
         &self,
         components: ComponentInfo<'_>,
-    ) -> Result<Vec<(EntryLoc, String, Ereport)>> {
+    ) -> Result<Vec<(BundleFile, Ereport)>> {
         let mut ereports = Vec::new();
         for_each_entry(&self.archive, |path, record| {
             if !path.starts_with("ereports/") || path.ends_with('/') {
@@ -832,7 +838,12 @@ impl<R: ReaderAt + Sync> Bundle<R> {
             if matches_patterns(components.part, &ereport.part)
                 && matches_patterns(components.serial, &ereport.serial)
             {
-                ereports.push((EntryLoc::new(record), path.to_string(), ereport));
+                let file = BundleFile {
+                    path: path.to_string(),
+                    loc: EntryLoc::new(record),
+                    modified: entry_mtime(record),
+                };
+                ereports.push((file, ereport));
             }
             Ok(())
         })?;
@@ -1235,7 +1246,7 @@ impl SledInfo {
 }
 
 #[derive(PartialEq, Debug)]
-struct Ereport {
+pub struct Ereport {
     part: String,
     serial: String,
     restart_id: String,
@@ -1243,6 +1254,23 @@ struct Ereport {
 }
 
 impl Ereport {
+    pub fn part(&self) -> &str {
+        &self.part
+    }
+
+    pub fn serial(&self) -> &str {
+        &self.serial
+    }
+
+    pub fn restart_id(&self) -> &str {
+        &self.restart_id
+    }
+
+    /// The error numeric association, unique among the ereports from its restart.
+    pub fn ena(&self) -> u64 {
+        self.ena
+    }
+
     fn from_path(path: &str) -> Option<Self> {
         // ereports/{part-number}-{serial_number}/{restart_id}/{ENA}.json
         if !path.starts_with("ereports") {
@@ -1282,7 +1310,7 @@ fn matches_patterns(patterns: &[Pattern], s: &str) -> bool {
     patterns.iter().any(|p| p.matches(s))
 }
 
-fn read_ereport_class(ereport_raw: &str) -> Option<&str> {
+pub fn read_ereport_class(ereport_raw: &str) -> Option<&str> {
     const CLASS_PREFIX: &str = "\"class\":\"";
     let class_start = ereport_raw.find(CLASS_PREFIX)? + CLASS_PREFIX.len();
     let class_end = class_start + ereport_raw[class_start..].find("\"")?;
@@ -1801,6 +1829,49 @@ mod tests {
             )
             .unwrap();
         assert_snapshot!("ereport_list_by_class", String::from_utf8_lossy(&class_out));
+    }
+
+    /// Every ereport is listed with its file, from which its class can be read, and files that
+    /// are not ereports are skipped.
+    #[test]
+    fn test_ereports() {
+        let mut files = zip_files();
+        files.push(ZipFile {
+            name: "ereports/907-0000023-BRM03250000/550e8400-e29b-41d4-a716-446655440000/26.json",
+            contents: Some("{}".to_string()),
+            ..Default::default()
+        });
+        let mut buf = Vec::new();
+        let bundle = Bundle::from_archive(build_zip_from(&mut buf, files, false)).unwrap();
+
+        let ereports: Vec<_> = bundle
+            .ereports()
+            .unwrap()
+            .into_iter()
+            .map(|(file, ereport)| {
+                let class = read_ereport_class(&read_file(&bundle, &file)).map(str::to_string);
+                format!(
+                    "{} {} {} {} {:#x} {}",
+                    file.path(),
+                    ereport.part(),
+                    ereport.serial(),
+                    ereport.restart_id(),
+                    ereport.ena(),
+                    class.unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ereports,
+            [
+                "ereports/907-0000023-BRM03250000/550e8400-e29b-41d4-a716-446655440000/0x12345678.json \
+                 907-0000023 BRM03250000 550e8400-e29b-41d4-a716-446655440000 0x12345678 \
+                 ereport.io.pci.device",
+                "ereports/913-0000019-BRM09250001/660f9511-f3ac-52e5-b827-557766551111/0x9abcdef0.json \
+                 913-0000019 BRM09250001 660f9511-f3ac-52e5-b827-557766551111 0x9abcdef0 \
+                 ereport.cpu.amd.bus_interconnect_error",
+            ]
+        );
     }
 
     #[test]
