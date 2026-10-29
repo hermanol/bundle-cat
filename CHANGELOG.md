@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- `Bundle::files` lists every file in a bundle, including those outside sled
+  directories.
+- `BundleFile::size` and `BundleFile::modified` give each file's size and
+  modification time.
+
 ### Fixed
 
 - `ereports list` and `ereports show` find ereports in real bundles, whose
