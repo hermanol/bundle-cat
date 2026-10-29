@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `LogFile::from_path` classifies a sled file's path by zone, service, kind of
+  log and an archived log's timestamp.
+
 ### Fixed
 
+- `logs` returns an error rather than panicking on a sled directory without a
+  `sled.txt`.
 - `ereports list` and `ereports show` find ereports in real bundles, whose
   files are named by ENA in hex (`0x1.json`). `ereports list` prints the ENA in
   hex, and files under `ereports/` that cannot be parsed are reported on
